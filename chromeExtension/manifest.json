@@ -1,0 +1,21 @@
+{
+    "manifest_version": 3,
+    "name": "Weave",
+    "version": "0.1",
+    "description": "translates lol",
+    "permissions": [
+      "activeTab",
+      "scripting",
+      "storage"
+    ],
+    "action": {
+      "default_popup": "popup.html"
+    },
+    "web_accessible_resources": [{
+      "resources": ["content.js"],
+      "matches": ["<all_urls>"]
+    }],
+    "background": {
+        "service_worker": "background.js"
+    }
+  }
