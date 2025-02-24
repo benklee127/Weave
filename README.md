@@ -34,8 +34,7 @@ the latency feels around 100-150ms for base infra + gemini api response time so 
 The textNodes come in as an array and I'm just passing in the full array as text with the prompt 
     "while maintaining the exact position of each element in the array, translate the plaintext items to chinese"
 
-extension is traversing the full dom and replacing rn, there's obv some breakpoint where querySelector-ing elements to edit would be faster but if you test it a little
-we'll be on the same page that we should prob optimize token count before anything else.
+extension is traversing the full dom and replacing rn
 
 priority:
   - determine best way to grab core content (minimize/optmize the token count)
