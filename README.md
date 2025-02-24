@@ -45,6 +45,7 @@ other things:
   - experiment with other LLM apis
   - test LLM streaming instead of response
   - experiment with model settings (specifically want to test top P top K) have suspicion it could affect speed notably
+  - there is probably some ways to concurrently make multiple smaller LLM calls to speed up, obv will have a multiplicative affect on prompt token count--but could be worth if we can actually keep our prompts short
 
 If we can get it reasonably fast and the quality is good we should:
   - choose better backend (firebase looks convenient for the short/medium term but i've never used)
