@@ -1,4 +1,6 @@
 Flask==3.1.0
 flask-cors==5.0.0
 google.generativeai
-pyOpenSSL-25.0.0
+pyOpenSSL==25.0.0
+dotenv
+google-genai
