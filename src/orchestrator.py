@@ -20,6 +20,7 @@ from src.agents.planner import PlannerAgent
 from src.agents.auditor import AuditorAgent
 from src.agents.architect import ArchitectAgent
 from src.agents.warden import WardenAgent
+from src.agents.librarian import LibrarianAgent
 
 # Load environment variables
 load_dotenv()
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 # Initialize MCP server
 mcp = FastMCP(
     name="autopoietic-agent",
-    version="0.1.0",
+    version="0.2.0",  # Phase 2: Semantic Memory
 )
 
 # Initialize agents (global scope for MCP tools)
@@ -44,6 +45,7 @@ planner = PlannerAgent(llm_client)
 auditor = AuditorAgent(llm_client)
 architect = ArchitectAgent(llm_client)
 warden = WardenAgent()
+librarian = LibrarianAgent()  # Phase 2: Semantic search
 
 
 @mcp.tool()
@@ -54,18 +56,22 @@ def health_check() -> dict:
     Returns:
         System status and component information
     """
+    # Get library stats
+    library_stats = librarian.get_library_stats()
+
     return {
         "status": "healthy",
-        "version": "0.1.0",
-        "phase": "1-foundation",
+        "version": "0.2.0",
+        "phase": "2-semantic-memory",
         "components": {
             "planner": "operational",
             "auditor": "operational",
             "architect": "operational",
             "warden": "operational",
-            "librarian": "not_implemented",
+            "librarian": "operational",  # Phase 2
             "janitor": "not_implemented",
         },
+        "library": library_stats,
         "token_usage": llm_client.get_token_usage(),
     }
 
@@ -112,9 +118,45 @@ def generate_tool(description: str, max_tasks: int = 10) -> dict:
             logger.info(f"Description: {task.description}")
 
             try:
-                # Phase 2: Test Generation
-                logger.info("PHASE 2: Test Generation")
+                # Phase 2: Semantic Search (NEW in Phase 2)
+                logger.info("PHASE 2: Semantic Search")
                 task.update_state(TaskState.IN_PROGRESS)
+
+                # Search for existing tools
+                best_match = librarian.get_best_match(task)
+
+                if best_match:
+                    logger.info(
+                        f"✓ Found existing tool: {best_match.metadata.get('name')} "
+                        f"(similarity: {best_match.similarity:.3f})"
+                    )
+
+                    # If high confidence, reuse directly
+                    if best_match.similarity >= librarian.high_confidence_threshold:
+                        logger.info("High-confidence match - reusing existing tool")
+
+                        task.update_state(TaskState.VERIFIED)
+                        results.append({
+                            "task_id": task.id,
+                            "description": task.description,
+                            "status": "reused",
+                            "reused_tool_id": best_match.tool_id,
+                            "reused_tool_name": best_match.metadata.get('name'),
+                            "similarity": best_match.similarity,
+                            "source_path": best_match.metadata.get('source_path'),
+                        })
+                        continue  # Skip to next task
+
+                    else:
+                        logger.info(
+                            "Match found but below high-confidence threshold - "
+                            "will generate new tool"
+                        )
+                else:
+                    logger.info("No existing tool found - will generate new")
+
+                # Phase 3: Test Generation (renumbered from Phase 2)
+                logger.info("PHASE 3: Test Generation")
 
                 test_metadata = auditor.generate_test_suite(task)
                 test_code = open(test_metadata.test_file_path).read()
@@ -135,14 +177,14 @@ def generate_tool(description: str, max_tasks: int = 10) -> dict:
                     # For Phase 1, we'll continue anyway
                     # In Phase 4, we might reject or regenerate
 
-                # Phase 3: Code Synthesis
-                logger.info("PHASE 3: Code Synthesis")
+                # Phase 4: Code Synthesis (renumbered from Phase 3)
+                logger.info("PHASE 4: Code Synthesis")
 
                 impl_path = architect.synthesize_implementation(task, test_code)
                 logger.info(f"Generated implementation: {impl_path}")
 
-                # Phase 4: Test Execution (Iterative Refinement)
-                logger.info("PHASE 4: Test Execution & Refinement")
+                # Phase 5: Test Execution (Iterative Refinement)
+                logger.info("PHASE 5: Test Execution & Refinement")
 
                 max_iterations = 3
                 for iteration in range(1, max_iterations + 1):
@@ -155,6 +197,19 @@ def generate_tool(description: str, max_tasks: int = 10) -> dict:
                         task.update_state(TaskState.VERIFIED)
                         logger.info(f"✓ Task {task.id} VERIFIED")
 
+                        # Phase 6: Register tool in library (NEW in Phase 2)
+                        logger.info("PHASE 6: Tool Registration")
+                        try:
+                            librarian.register_tool(
+                                tool_id=task.id,
+                                source_path=task.implementation_path,
+                                test_result=test_result
+                            )
+                            logger.info(f"✓ Tool registered in library")
+                        except Exception as reg_error:
+                            logger.warning(f"Failed to register tool: {reg_error}")
+                            # Don't fail the task, just log warning
+
                         results.append({
                             "task_id": task.id,
                             "description": task.description,
@@ -163,6 +218,7 @@ def generate_tool(description: str, max_tasks: int = 10) -> dict:
                             "test_path": task.test_suite_path,
                             "tests_passed": test_result.tests_passed,
                             "execution_time": test_result.execution_time,
+                            "registered_in_library": True,
                         })
                         break
                     else:
@@ -205,10 +261,12 @@ def generate_tool(description: str, max_tasks: int = 10) -> dict:
 
         # Summary
         verified_count = sum(1 for r in results if r["status"] == "verified")
+        reused_count = sum(1 for r in results if r["status"] == "reused")
         failed_count = sum(1 for r in results if r["status"] == "failed")
 
         logger.info(f"\n=== Tool Generation Complete: {correlation_id} ===")
         logger.info(f"Tasks verified: {verified_count}/{len(task_graph.nodes)}")
+        logger.info(f"Tasks reused: {reused_count}/{len(task_graph.nodes)}")
         logger.info(f"Tasks failed: {failed_count}/{len(task_graph.nodes)}")
 
         return {
@@ -217,8 +275,10 @@ def generate_tool(description: str, max_tasks: int = 10) -> dict:
             "description": description,
             "total_tasks": len(task_graph.nodes),
             "verified": verified_count,
+            "reused": reused_count,  # Phase 2
             "failed": failed_count,
             "results": results,
+            "library_stats": librarian.get_library_stats(),  # Phase 2
             "token_usage": llm_client.get_token_usage(),
         }
 

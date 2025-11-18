@@ -1,6 +1,6 @@
 [project]
 name = "autopoietic-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "A self-propagating Model Context Protocol layer with TDD and semantic search"
 authors = [
     {name = "Your Name", email = "your.email@example.com"}
@@ -29,6 +29,10 @@ dependencies = [
     "httpx>=0.26.0",
     "rich>=13.7.0",
     "loguru>=0.7.2",
+
+    # Phase 2: Semantic Memory (now core)
+    "chromadb>=0.4.22",
+    "sentence-transformers>=2.3.0",
 ]
 
 [project.optional-dependencies]
