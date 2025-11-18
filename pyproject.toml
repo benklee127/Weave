@@ -1,0 +1,191 @@
+[project]
+name = "autopoietic-agent"
+version = "0.1.0"
+description = "A self-propagating Model Context Protocol layer with TDD and semantic search"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    # Core MCP and AI
+    "fastmcp>=0.4.0",
+    "anthropic>=0.18.0",
+
+    # Data validation and serialization
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+
+    # Testing framework
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-timeout>=2.2.0",
+    "pytest-cov>=4.1.0",
+
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "httpx>=0.26.0",
+    "rich>=13.7.0",
+    "loguru>=0.7.2",
+]
+
+[project.optional-dependencies]
+# Phase 2: Semantic Memory
+semantic = [
+    "chromadb>=0.4.22",
+    "sentence-transformers>=2.3.0",
+    "rank-bm25>=0.2.2",
+]
+
+# Phase 3: Hot-Reload
+hotreload = [
+    "watchdog>=4.0.0",
+]
+
+# Phase 4: Production
+production = [
+    "docker>=7.0.0",
+    "psycopg[binary]>=3.1.0",
+    "pgvector>=0.2.5",
+    "apscheduler>=3.10.0",
+    "prometheus-client>=0.19.0",
+]
+
+# Development tools
+dev = [
+    "ruff>=0.1.9",
+    "mypy>=1.8.0",
+    "black>=23.12.1",
+    "ipython>=8.20.0",
+    "pre-commit>=3.6.0",
+]
+
+# All optional dependencies
+all = [
+    "autopoietic-agent[semantic,hotreload,production,dev]",
+]
+
+[project.scripts]
+autopoietic = "src.orchestrator:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/autopoietic-agent"
+Documentation = "https://github.com/yourusername/autopoietic-agent/blob/main/README.md"
+Repository = "https://github.com/yourusername/autopoietic-agent"
+Issues = "https://github.com/yourusername/autopoietic-agent/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = [
+    "-ra",
+    "-q",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=src",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+timeout = 300
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "ARG", # flake8-unused-arguments
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/*" = ["ARG", "S101"]
+
+[tool.ruff.isort]
+known-first-party = ["src"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+extra_checks = true
+
+[[tool.mypy.overrides]]
+module = [
+    "chromadb.*",
+    "rank_bm25.*",
+    "watchdog.*",
+    "docker.*",
+    "prometheus_client.*",
+]
+ignore_missing_imports = true
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
