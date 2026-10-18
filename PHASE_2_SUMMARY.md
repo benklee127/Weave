@@ -1,3 +1,5 @@
+> **Historical document.** This snapshot is out of date. See [README.md](README.md) and [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the current status.
+
 # Phase 2: Semantic Memory - Implementation Complete ✓
 
 **Completion Date:** 2025-11-18

@@ -1,3 +1,5 @@
+> **Historical document.** This snapshot is out of date. See [README.md](README.md) and [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the current status.
+
 # Autopoietic Agent - Implementation Summary
 
 ## ✓ Phase 1: Foundation - COMPLETE

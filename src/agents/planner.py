@@ -8,8 +8,6 @@ organized as a Directed Acyclic Graph (DAG).
 import json
 import uuid
 import logging
-import re
-from typing import Optional
 
 from src.core.schemas import (
     TaskNode,
@@ -18,7 +16,8 @@ from src.core.schemas import (
     DecompositionRequest,
     DecompositionResponse,
 )
-from src.utils.llm_client import LLMClient
+from src.utils.json_extract import JSONExtractionError, extract_json
+from src.utils.llm_client import LLMClientProtocol
 from src.utils.prompts import (
     PLANNER_SYSTEM,
     PLANNER_DECOMPOSITION_PROMPT,
@@ -36,7 +35,7 @@ class PlannerAgent:
     subtasks, each small enough to implement as a single function.
     """
 
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMClientProtocol):
         """
         Initialize the Planner Agent.
 
@@ -75,6 +74,7 @@ class PlannerAgent:
                 system=PLANNER_SYSTEM,
                 max_tokens=4096,
                 temperature=0.7,  # Some creativity for decomposition
+                agent=self.agent_id,
             )
 
             # Parse the JSON response
@@ -102,10 +102,11 @@ class PlannerAgent:
 
     def _extract_and_parse_json(self, text: str) -> list:
         """
-        Extract and parse JSON array from LLM response.
+        Extract the JSON array of tasks from an LLM response.
 
-        The LLM sometimes includes markdown or explanatory text, so we
-        need to extract just the JSON portion.
+        Uses ``json.JSONDecoder.raw_decode`` scanning (see
+        ``src.utils.json_extract``) so prose, markdown fences and nested
+        brackets are handled. A ``{"tasks": [...]}`` wrapper is also accepted.
 
         Args:
             text: Raw text from LLM
@@ -116,31 +117,24 @@ class PlannerAgent:
         Raises:
             ValueError: If no valid JSON found
         """
-        # Try to find JSON array in the response
-        # Look for [ ... ] pattern
-        match = re.search(r'\[\s*\{.*?\}\s*\]', text, re.DOTALL)
-
-        if match:
-            json_str = match.group(0)
-        else:
-            # If no match, assume entire response is JSON
-            json_str = text.strip()
+        def is_task_list(value) -> bool:
+            return bool(value) and all(isinstance(item, dict) for item in value)
 
         try:
-            data = json.loads(json_str)
-
-            if not isinstance(data, list):
-                raise ValueError("Expected JSON array of tasks")
-
-            return data
-
-        except json.JSONDecodeError:
-            # Try to find between code blocks
-            code_block_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', text, re.DOTALL)
-            if code_block_match:
-                return json.loads(code_block_match.group(1))
-
-            raise ValueError("Could not extract valid JSON from response")
+            return extract_json(text, expect=list, validate=is_task_list)
+        except JSONExtractionError as list_error:
+            try:
+                wrapper = extract_json(
+                    text,
+                    expect=dict,
+                    validate=lambda d: isinstance(d.get("tasks"), list)
+                    and is_task_list(d["tasks"]),
+                )
+                return wrapper["tasks"]
+            except JSONExtractionError:
+                raise ValueError(
+                    f"Could not extract valid JSON task list from response: {list_error}"
+                )
 
     def _build_task_graph(self, tasks_data: list) -> TaskGraph:
         """
@@ -164,8 +158,12 @@ class PlannerAgent:
         # Create task nodes
         for i, task_data in enumerate(tasks_data):
             # Validate required fields
-            if "description" not in task_data:
+            if not isinstance(task_data, dict) or not str(task_data.get("description", "")).strip():
                 raise ValueError(f"Task {i} missing 'description' field")
+            if not isinstance(task_data.get("input_schema", {}), dict) or not isinstance(
+                task_data.get("output_schema", {}), dict
+            ):
+                raise ValueError(f"Task {i} schemas must be JSON objects")
 
             # Generate unique ID
             task_id = f"task_{uuid.uuid4().hex[:8]}"
@@ -188,11 +186,13 @@ class PlannerAgent:
             node = graph.get_node(task_id_map[i])
 
             if "dependencies" in task_data:
-                dep_indices = task_data["dependencies"]
+                dep_indices = task_data["dependencies"] or []
+                if not isinstance(dep_indices, list):
+                    raise ValueError(f"Task {i} dependencies must be a list")
 
                 # Validate dependency indices
                 for dep_idx in dep_indices:
-                    if not isinstance(dep_idx, int):
+                    if not isinstance(dep_idx, int) or isinstance(dep_idx, bool):
                         raise ValueError(
                             f"Dependency must be integer index, got {dep_idx}"
                         )
@@ -217,34 +217,7 @@ class PlannerAgent:
             graph: TaskGraph to validate
 
         Raises:
-            ValueError: If graph contains cycles
+            ValueError: If graph contains cycles or unknown dependencies
         """
-        # Use DFS to detect cycles
-        visited = set()
-        rec_stack = set()
-
-        def has_cycle(node_id: str) -> bool:
-            """DFS to detect cycle."""
-            visited.add(node_id)
-            rec_stack.add(node_id)
-
-            node = graph.get_node(node_id)
-            if node:
-                for dep_id in node.dependencies:
-                    if dep_id not in visited:
-                        if has_cycle(dep_id):
-                            return True
-                    elif dep_id in rec_stack:
-                        return True
-
-            rec_stack.remove(node_id)
-            return False
-
-        for node in graph.nodes:
-            if node.id not in visited:
-                if has_cycle(node.id):
-                    raise ValueError(
-                        f"Task graph contains cycle involving task: {node.id}"
-                    )
-
+        graph.validate_acyclic()
         logger.debug("Task graph validated as DAG (no cycles)")

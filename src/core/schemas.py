@@ -18,6 +18,13 @@ class TaskState(str, Enum):
     FAILED = "failed"
 
 
+class ToolStatus(str, Enum):
+    """Lifecycle status of a tool in the library."""
+    ACTIVE = "active"
+    BROKEN = "broken"
+    DEPRECATED = "deprecated"
+
+
 class TaskNode(BaseModel):
     """
     Represents a single atomic task in the decomposition graph.
@@ -34,6 +41,8 @@ class TaskNode(BaseModel):
     test_suite_path: Optional[str] = Field(default=None, description="Path to generated test file")
     implementation_path: Optional[str] = Field(default=None, description="Path to implementation file")
     error_trace: Optional[str] = Field(default=None, description="Error message if task failed")
+    reused_tool_id: Optional[str] = Field(default=None, description="Library tool ID reused for this task")
+    attempts: int = Field(default=0, description="Number of generation/refinement attempts so far")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
@@ -83,6 +92,81 @@ class TaskGraph(BaseModel):
                 ready.append(node)
 
         return ready
+
+    def has_cycle(self) -> bool:
+        """Return True if the dependency graph contains a cycle."""
+        return self._kahn_order()[1]
+
+    def validate_acyclic(self) -> None:
+        """Raise ValueError if the graph has a cycle or unknown dependency."""
+        ids = {n.id for n in self.nodes}
+        for node in self.nodes:
+            for dep in node.dependencies:
+                if dep not in ids:
+                    raise ValueError(f"Task {node.id} depends on unknown task {dep}")
+        order, cyclic = self._kahn_order()
+        if cyclic:
+            stuck = sorted(ids - {n.id for n in order})
+            raise ValueError(f"Task graph contains a cycle involving: {', '.join(stuck)}")
+
+    def _kahn_order(self):
+        """Kahn's algorithm. Returns (ordered nodes, has_cycle)."""
+        ids = {n.id for n in self.nodes}
+        indegree = {n.id: len({d for d in n.dependencies if d in ids}) for n in self.nodes}
+        dependents: Dict[str, List[str]] = {n.id: [] for n in self.nodes}
+        for n in self.nodes:
+            for d in set(n.dependencies):
+                if d in ids:
+                    dependents[d].append(n.id)
+        by_id = {n.id: n for n in self.nodes}
+        queue = [n.id for n in self.nodes if indegree[n.id] == 0]
+        ordered: List[TaskNode] = []
+        while queue:
+            current = queue.pop(0)
+            ordered.append(by_id[current])
+            for child in dependents[current]:
+                indegree[child] -= 1
+                if indegree[child] == 0:
+                    queue.append(child)
+        return ordered, len(ordered) != len(self.nodes)
+
+    def topological_order(self) -> List[TaskNode]:
+        """
+        Return nodes ordered so every task follows its dependencies.
+
+        Raises:
+            ValueError: If the graph contains a cycle or unknown dependency.
+        """
+        self.validate_acyclic()
+        return self._kahn_order()[0]
+
+    def propagate_failure(self, task_id: str) -> List[str]:
+        """
+        Mark every transitive dependent of ``task_id`` as FAILED.
+
+        Args:
+            task_id: The task that failed.
+
+        Returns:
+            IDs of the dependents that were newly marked FAILED.
+        """
+        affected: List[str] = []
+        frontier = [task_id]
+        seen = {task_id}
+        while frontier:
+            current = frontier.pop()
+            for node in self.nodes:
+                if node.id in seen or current not in node.dependencies:
+                    continue
+                seen.add(node.id)
+                frontier.append(node.id)
+                if node.state not in (TaskState.FAILED, TaskState.VERIFIED):
+                    node.update_state(
+                        TaskState.FAILED,
+                        error=f"Dependency {task_id} failed; task not attempted",
+                    )
+                    affected.append(node.id)
+        return affected
 
     def get_failed_tasks(self) -> List[TaskNode]:
         """Get all tasks in FAILED state."""

@@ -5,18 +5,19 @@ This agent generates comprehensive pytest test suites from task specifications
 and validates test quality using a "Critic" pattern.
 """
 
-import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from src.core.schemas import (
     TaskNode,
     TestSuiteMetadata,
     TestValidationResult,
 )
-from src.utils.llm_client import LLMClient
+from src.utils.json_extract import JSONExtractionError, extract_json
+from src.utils.llm_client import LLMClientProtocol
+from src.utils.naming import derive_function_name, unique_path
 from src.utils.prompts import (
     AUDITOR_SYSTEM,
     AUDITOR_TEST_GENERATION_PROMPT,
@@ -36,7 +37,11 @@ class AuditorAgent:
     Architect to satisfy.
     """
 
-    def __init__(self, llm_client: LLMClient, test_output_dir: str = "./tests/generated"):
+    def __init__(
+        self,
+        llm_client: LLMClientProtocol,
+        test_output_dir: Union[str, Path] = "./tests/generated",
+    ):
         """
         Initialize the Auditor Agent.
 
@@ -49,12 +54,15 @@ class AuditorAgent:
         self.test_output_dir = Path(test_output_dir)
         self.test_output_dir.mkdir(parents=True, exist_ok=True)
 
-    def generate_test_suite(self, task: TaskNode) -> TestSuiteMetadata:
+    def generate_test_suite(
+        self, task: TaskNode, dependency_context: Optional[str] = None
+    ) -> TestSuiteMetadata:
         """
         Generate a pytest test suite for a task.
 
         Args:
             task: TaskNode to generate tests for
+            dependency_context: Optional signatures of verified upstream tools
 
         Returns:
             TestSuiteMetadata with info about generated tests
@@ -75,6 +83,11 @@ class AuditorAgent:
             output_schema=task.output_schema,
             function_name=function_name,
         )
+        if dependency_context:
+            prompt += (
+                "\n\nAVAILABLE UPSTREAM TOOLS (already verified):\n"
+                f"{dependency_context}"
+            )
 
         try:
             # Call LLM
@@ -83,14 +96,18 @@ class AuditorAgent:
                 system=AUDITOR_SYSTEM,
                 max_tokens=4096,
                 temperature=0.5,  # Lower temperature for more consistent tests
+                agent=self.agent_id,
             )
 
             # Clean up the code (remove markdown if present)
             test_code = self._clean_code(test_code)
 
             # Save to file
-            test_file_path = self.test_output_dir / f"test_{function_name}.py"
-            test_file_path.write_text(test_code)
+            self.test_output_dir.mkdir(parents=True, exist_ok=True)
+            test_file_path = unique_path(
+                self.test_output_dir, "test_", function_name, task.id, test_code
+            )
+            test_file_path.write_text(test_code, encoding="utf-8")
 
             # Extract metadata
             metadata = self._extract_test_metadata(test_code, task.id, str(test_file_path))
@@ -137,6 +154,7 @@ class AuditorAgent:
                 system=AUDITOR_SYSTEM,
                 max_tokens=2048,
                 temperature=0.3,  # Low temperature for consistent analysis
+                agent=self.agent_id,
             )
 
             # Parse JSON response
@@ -149,7 +167,7 @@ class AuditorAgent:
                 total_lines=result_data.get("total_lines", 0),
                 assertion_density=result_data.get("assertion_density", 0.0),
                 issues=result_data.get("issues", []),
-                recommendation=result_data.get("recommendation", "REJECT"),
+                recommendation=str(result_data.get("recommendation", "REJECT")).strip().upper(),
                 reason=result_data.get("reason", "No reason provided"),
             )
 
@@ -169,34 +187,10 @@ class AuditorAgent:
         """
         Derive a snake_case function name from a task description.
 
-        Args:
-            description: Task description
-
-        Returns:
-            Valid Python function name
-
         Examples:
             "Calculate compound interest" -> "calculate_compound_interest"
-            "Fetch user data from API" -> "fetch_user_data_from_api"
         """
-        # Convert to lowercase
-        name = description.lower()
-
-        # Remove special characters
-        name = re.sub(r'[^a-z0-9\s]', '', name)
-
-        # Replace spaces with underscores
-        name = re.sub(r'\s+', '_', name)
-
-        # Truncate if too long
-        if len(name) > 50:
-            name = name[:50]
-
-        # Ensure it starts with a letter
-        if name and not name[0].isalpha():
-            name = 'func_' + name
-
-        return name or 'generated_function'
+        return derive_function_name(description)
 
     def _clean_code(self, code: str) -> str:
         """
@@ -260,37 +254,12 @@ class AuditorAgent:
 
     def _extract_and_parse_json(self, text: str) -> dict:
         """
-        Extract and parse JSON object from LLM response.
-
-        Args:
-            text: Raw text from LLM
-
-        Returns:
-            Parsed JSON dict
+        Extract the JSON object from an LLM response (raw_decode based).
 
         Raises:
-            ValueError: If no valid JSON found
+            ValueError: If no valid JSON object found
         """
-        # Try to find JSON object
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-
-        if match:
-            json_str = match.group(0)
-        else:
-            json_str = text.strip()
-
         try:
-            data = json.loads(json_str)
-
-            if not isinstance(data, dict):
-                raise ValueError("Expected JSON object")
-
-            return data
-
-        except json.JSONDecodeError:
-            # Try to find between code blocks
-            code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
-            if code_block_match:
-                return json.loads(code_block_match.group(1))
-
-            raise ValueError("Could not extract valid JSON from response")
+            return extract_json(text, expect=dict)
+        except JSONExtractionError as e:
+            raise ValueError(str(e))

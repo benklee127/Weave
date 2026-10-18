@@ -38,21 +38,27 @@ env/
 .env
 .env.local
 
-# Data directories (keep structure, ignore contents)
+# Runtime data (keep .gitkeep placeholders only)
+data/*
+!data/.gitkeep
 data/vector_db/*
 !data/vector_db/.gitkeep
 data/tool_metadata/*
 !data/tool_metadata/.gitkeep
 data/logs/*
 !data/logs/.gitkeep
+data/*.jsonl
+data/*.json
 
 # Generated tools (except __init__.py)
-tools/*.py
+tools/*
 !tools/__init__.py
+!tools/.gitkeep
 
 # Generated tests
 tests/generated/*
 !tests/generated/__init__.py
+!tests/generated/.gitkeep
 
 # Coverage reports
 htmlcov/

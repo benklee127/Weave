@@ -1,15 +1,22 @@
 """
-Embedding generation for code and text using sentence-transformers.
+Embedding generation for code and text.
 
-This module provides semantic embeddings for tool descriptions and code.
+Uses sentence-transformers when installed (optional dependency). When it is
+missing, or the model cannot be loaded, a deterministic dependency-free
+``HashEmbeddingGenerator`` is used instead (also used in tests).
 """
 
+import hashlib
 import logging
-from typing import List, Union
-from sentence_transformers import SentenceTransformer
+import math
+import re
+from typing import Any, List, Optional, Union
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+HASH_MODEL_NAME = "hash"
 
 
 class EmbeddingGenerator:
@@ -32,6 +39,8 @@ class EmbeddingGenerator:
         logger.info(f"Loading embedding model: {model_name}")
 
         try:
+            from sentence_transformers import SentenceTransformer  # optional dep
+
             self.model = SentenceTransformer(model_name)
             self.embedding_dim = self.model.get_sentence_embedding_dimension()
 
@@ -125,10 +134,15 @@ class EmbeddingGenerator:
         if description:
             parts.append(description)
             parts.append(description)  # Double weight
+            parts.append(description)  # Triple weight
 
-        # Add docstring
+        # Add docstring body (the first line is usually the description itself)
         if docstring:
-            parts.append(docstring)
+            doc_lines = [ln.strip() for ln in docstring.splitlines() if ln.strip()]
+            if description and doc_lines and doc_lines[0].rstrip(".") == description.rstrip("."):
+                doc_lines = doc_lines[1:]
+            if doc_lines:
+                parts.append(" ".join(doc_lines))
 
         # Add signature (helps match technical details)
         if signature:
@@ -182,25 +196,85 @@ class EmbeddingGenerator:
         return self.embedding_dim
 
 
-# Cache for singleton instance
-_embedding_generator_cache = None
-
-
-def get_embedding_generator(model_name: str = "all-MiniLM-L6-v2") -> EmbeddingGenerator:
+class HashEmbeddingGenerator:
     """
-    Get a singleton embedding generator instance.
+    Deterministic, dependency-free embedding generator.
 
-    This caches the model to avoid reloading on every call.
+    Uses the hashing trick over word unigrams/bigrams (identifiers are split on
+    snake_case / camelCase). Not as semantic as a neural model, but stable
+    across processes and good enough for lexical-overlap matching.
+    """
+
+    def __init__(self, dimension: int = 384, model_name: str = HASH_MODEL_NAME):
+        self.model_name = model_name
+        self.embedding_dim = dimension
+
+    @staticmethod
+    def _tokens(text: str) -> List[str]:
+        text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text or "")
+        return re.findall(r"[a-z0-9]+", text.lower())
+
+    def generate_embedding(self, text: str) -> List[float]:
+        """Generate a unit-length embedding for a single text."""
+        vec = [0.0] * self.embedding_dim
+        tokens = self._tokens(text)
+        features = tokens + [f"{a}_{b}" for a, b in zip(tokens, tokens[1:])]
+        for feat in features:
+            digest = hashlib.sha256(feat.encode("utf-8")).digest()
+            idx = int.from_bytes(digest[:4], "big") % self.embedding_dim
+            sign = 1.0 if digest[4] & 1 else -1.0
+            vec[idx] += sign
+        norm = math.sqrt(sum(v * v for v in vec))
+        if norm == 0.0:
+            # Empty text: deterministic non-zero vector (cosine needs norm > 0)
+            vec[0] = 1.0
+            return vec
+        return [v / norm for v in vec]
+
+    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for multiple texts."""
+        return [self.generate_embedding(t) for t in texts]
+
+    # Shared helpers (same behavior as EmbeddingGenerator)
+    generate_tool_embedding = EmbeddingGenerator.generate_tool_embedding
+    similarity = EmbeddingGenerator.similarity
+    get_embedding_dimension = EmbeddingGenerator.get_embedding_dimension
+
+
+_embedding_generator_cache: dict = {}
+
+
+def get_embedding_generator(
+    model_name: str = "all-MiniLM-L6-v2",
+) -> Any:
+    """
+    Get a cached embedding generator.
+
+    ``model_name == "hash"`` always returns the hash generator. Otherwise the
+    sentence-transformers model is tried and the hash generator is used as a
+    fallback when the library is missing or the model fails to load.
 
     Args:
         model_name: Model to use
 
     Returns:
-        EmbeddingGenerator instance
+        EmbeddingGenerator or HashEmbeddingGenerator instance
     """
-    global _embedding_generator_cache
+    cached = _embedding_generator_cache.get(model_name)
+    if cached is not None:
+        return cached
 
-    if _embedding_generator_cache is None:
-        _embedding_generator_cache = EmbeddingGenerator(model_name)
+    if model_name == HASH_MODEL_NAME:
+        generator: Any = HashEmbeddingGenerator()
+    else:
+        try:
+            generator = EmbeddingGenerator(model_name)
+        except Exception as e:  # ImportError, offline model download, etc.
+            logger.warning(
+                f"Falling back to hash embeddings (could not load "
+                f"'{model_name}': {e})"
+            )
+            generator = HashEmbeddingGenerator()
 
-    return _embedding_generator_cache
+    _embedding_generator_cache[model_name] = generator
+    return generator

@@ -9,10 +9,11 @@ import logging
 import re
 import ast
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from src.core.schemas import TaskNode, TestExecutionResult
-from src.utils.llm_client import LLMClient
+from src.utils.llm_client import LLMClientProtocol
+from src.utils.naming import derive_function_name, unique_path
 from src.utils.prompts import (
     ARCHITECT_SYSTEM,
     ARCHITECT_SYNTHESIS_PROMPT,
@@ -33,8 +34,8 @@ class ArchitectAgent:
 
     def __init__(
         self,
-        llm_client: LLMClient,
-        tool_output_dir: str = "./tools",
+        llm_client: LLMClientProtocol,
+        tool_output_dir: Union[str, Path] = "./tools",
         max_refinement_iterations: int = 3,
     ):
         """
@@ -52,7 +53,10 @@ class ArchitectAgent:
         self.max_refinement_iterations = max_refinement_iterations
 
     def synthesize_implementation(
-        self, task: TaskNode, test_code: str
+        self,
+        task: TaskNode,
+        test_code: str,
+        dependency_context: Optional[str] = None,
     ) -> str:
         """
         Generate implementation code for a task.
@@ -60,6 +64,7 @@ class ArchitectAgent:
         Args:
             task: TaskNode with specification
             test_code: pytest test suite code
+            dependency_context: Optional signatures of verified upstream tools
 
         Returns:
             Path to generated implementation file
@@ -81,6 +86,11 @@ class ArchitectAgent:
             input_schema=task.input_schema,
             output_schema=task.output_schema,
         )
+        if dependency_context:
+            prompt += (
+                "\n\nAVAILABLE UPSTREAM TOOLS (already verified, importable by "
+                f"name if needed):\n{dependency_context}"
+            )
 
         try:
             # Call LLM
@@ -89,6 +99,7 @@ class ArchitectAgent:
                 system=ARCHITECT_SYSTEM,
                 max_tokens=4096,
                 temperature=0.3,  # Low temperature for consistent code
+                agent=self.agent_id,
             )
 
             # Clean up the code
@@ -98,8 +109,11 @@ class ArchitectAgent:
             self._validate_syntax(code)
 
             # Save to file
-            impl_file_path = self.tool_output_dir / f"{function_name}.py"
-            impl_file_path.write_text(code)
+            self.tool_output_dir.mkdir(parents=True, exist_ok=True)
+            impl_file_path = unique_path(
+                self.tool_output_dir, "", function_name, task.id, code
+            )
+            impl_file_path.write_text(code, encoding="utf-8")
 
             # Update task with implementation path
             task.implementation_path = str(impl_file_path)
@@ -147,7 +161,7 @@ class ArchitectAgent:
         if not task.implementation_path:
             raise ValueError("No implementation to refine")
 
-        original_code = Path(task.implementation_path).read_text()
+        original_code = Path(task.implementation_path).read_text(encoding="utf-8")
 
         # Format the refinement prompt
         prompt = format_prompt(
@@ -164,6 +178,7 @@ class ArchitectAgent:
                 system=ARCHITECT_SYSTEM,
                 max_tokens=4096,
                 temperature=0.2,  # Even lower for debugging
+                agent=self.agent_id,
             )
 
             # Clean up the code
@@ -174,7 +189,7 @@ class ArchitectAgent:
 
             # Save refined version
             impl_file_path = Path(task.implementation_path)
-            impl_file_path.write_text(refined_code)
+            impl_file_path.write_text(refined_code, encoding="utf-8")
 
             logger.info(f"Refined implementation (iteration {iteration})")
 
@@ -185,33 +200,8 @@ class ArchitectAgent:
             raise ValueError(f"Failed to refine implementation: {e}")
 
     def _derive_function_name(self, description: str) -> str:
-        """
-        Derive a snake_case function name from a task description.
-
-        Args:
-            description: Task description
-
-        Returns:
-            Valid Python function name
-        """
-        # Convert to lowercase
-        name = description.lower()
-
-        # Remove special characters
-        name = re.sub(r'[^a-z0-9\s]', '', name)
-
-        # Replace spaces with underscores
-        name = re.sub(r'\s+', '_', name)
-
-        # Truncate if too long
-        if len(name) > 50:
-            name = name[:50]
-
-        # Ensure it starts with a letter
-        if name and not name[0].isalpha():
-            name = 'func_' + name
-
-        return name or 'generated_function'
+        """Derive a valid snake_case function name from a task description."""
+        return derive_function_name(description)
 
     def _clean_code(self, code: str) -> str:
         """

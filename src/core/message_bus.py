@@ -6,7 +6,8 @@ to communicate asynchronously without tight coupling.
 """
 
 import asyncio
-from typing import Dict, List, Callable, Any
+import inspect
+from typing import Dict, List, Callable, Any, Optional
 from collections import defaultdict
 import logging
 
@@ -80,7 +81,7 @@ class MessageBus:
         tasks = []
         for handler in handlers:
             try:
-                if asyncio.iscoroutinefunction(handler):
+                if inspect.iscoroutinefunction(handler):
                     tasks.append(handler(message))
                 else:
                     # Wrap sync handlers in async

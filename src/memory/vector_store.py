@@ -5,7 +5,9 @@ This module provides persistent storage and retrieval of tool embeddings
 for semantic search.
 """
 
+import json
 import logging
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import chromadb
@@ -28,6 +30,7 @@ class VectorStore:
         Args:
             persist_directory: Directory to persist the database
         """
+        self._lock = threading.RLock()
         self.persist_directory = Path(persist_directory)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
 
@@ -50,37 +53,71 @@ class VectorStore:
             f"Vector store initialized with {self.collection.count()} existing tools"
         )
 
-    def add_tool(
+    def upsert(
         self,
         tool_id: str,
         embedding: List[float],
         metadata: Dict[str, Any],
     ) -> None:
         """
-        Add a tool to the vector store.
+        Insert or replace a tool (idempotent).
 
         Args:
             tool_id: Unique identifier for the tool
             embedding: Vector embedding of the tool
-            metadata: Tool metadata (name, description, code, etc.)
+            metadata: Tool metadata (name, description, lifecycle fields, ...)
         """
         try:
-            # ChromaDB expects documents for text content
-            # We'll use the description as the document
-            document = metadata.get("description", "")
-
-            self.collection.add(
-                ids=[tool_id],
-                embeddings=[embedding],
-                documents=[document],
-                metadatas=[self._sanitize_metadata(metadata)]
-            )
-
-            logger.info(f"Added tool to vector store: {tool_id}")
-
+            with self._lock:
+                self.collection.upsert(
+                    ids=[tool_id],
+                    embeddings=[embedding],
+                    documents=[metadata.get("description", "") or ""],
+                    metadatas=[self._sanitize_metadata(metadata)],
+                )
+            logger.info(f"Upserted tool in vector store: {tool_id}")
         except Exception as e:
-            logger.error(f"Failed to add tool {tool_id}: {e}")
+            logger.error(f"Failed to upsert tool {tool_id}: {e}")
             raise
+
+    def add_tool(
+        self,
+        tool_id: str,
+        embedding: List[float],
+        metadata: Dict[str, Any],
+    ) -> None:
+        """Add a tool (kept for compatibility; behaves as upsert)."""
+        self.upsert(tool_id, embedding, metadata)
+
+    def update_metadata(self, tool_id: str, fields: Dict[str, Any]) -> bool:
+        """
+        Merge fields into a tool's stored metadata without re-embedding.
+
+        Returns:
+            True if the tool existed and was updated.
+        """
+        with self._lock:
+            existing = self.collection.get(ids=[tool_id], include=["metadatas"])
+            if not existing["ids"]:
+                return False
+            merged = dict(existing["metadatas"][0] or {})
+            merged.update(self._sanitize_metadata(fields))
+            self.collection.update(ids=[tool_id], metadatas=[merged])
+        return True
+
+    def list_with_embeddings(self) -> List[Dict[str, Any]]:
+        """List all tools including their embeddings."""
+        results = self.collection.get(include=["metadatas", "embeddings"])
+        ids = list(results["ids"])
+        embs = results["embeddings"] if results["embeddings"] is not None else []
+        out = []
+        for i, tool_id in enumerate(ids):
+            out.append({
+                "id": tool_id,
+                "metadata": results["metadatas"][i],
+                "embedding": [float(x) for x in embs[i]],
+            })
+        return out
 
     def update_tool(
         self,
@@ -99,12 +136,13 @@ class VectorStore:
         try:
             document = metadata.get("description", "")
 
-            self.collection.update(
-                ids=[tool_id],
-                embeddings=[embedding],
-                documents=[document],
-                metadatas=[self._sanitize_metadata(metadata)]
-            )
+            with self._lock:
+                self.collection.update(
+                    ids=[tool_id],
+                    embeddings=[embedding],
+                    documents=[document],
+                    metadatas=[self._sanitize_metadata(metadata)]
+                )
 
             logger.info(f"Updated tool in vector store: {tool_id}")
 
@@ -130,9 +168,12 @@ class VectorStore:
             Dictionary with ids, distances, and metadatas
         """
         try:
+            total = self.collection.count()
+            if total == 0:
+                return {'ids': [], 'similarities': [], 'metadatas': [], 'documents': []}
             results = self.collection.query(
                 query_embeddings=[query_embedding],
-                n_results=n_results,
+                n_results=max(1, min(n_results, total)),
                 where=where,
             )
 
@@ -179,7 +220,12 @@ class VectorStore:
                     'id': results['ids'][0],
                     'metadata': results['metadatas'][0],
                     'document': results['documents'][0],
-                    'embedding': results['embeddings'][0] if results['embeddings'] else None,
+                    'embedding': (
+                        [float(x) for x in results['embeddings'][0]]
+                        if results.get('embeddings') is not None
+                        and len(results['embeddings']) > 0
+                        else None
+                    ),
                 }
 
             return None
@@ -276,16 +322,16 @@ class VectorStore:
 
             # Convert complex types to strings
             if isinstance(value, (dict, list)):
-                # Truncate large objects
-                str_value = str(value)
-                if len(str_value) > 1000:
-                    str_value = str_value[:997] + "..."
-                sanitized[key] = str_value
+                # Store as JSON so it can be parsed back (no truncation)
+                try:
+                    sanitized[key] = json.dumps(value, default=str)
+                except (TypeError, ValueError):
+                    sanitized[key] = str(value)
             elif isinstance(value, (str, int, float, bool)):
                 # Keep simple types as-is
                 # Truncate long strings
-                if isinstance(value, str) and len(value) > 1000:
-                    sanitized[key] = value[:997] + "..."
+                if isinstance(value, str) and len(value) > 8000:
+                    sanitized[key] = value[:7997] + "..."
                 else:
                     sanitized[key] = value
             else:
